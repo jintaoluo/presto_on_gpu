@@ -17,7 +17,4 @@ The 1st release
 
 
 2, Only accelsearch is GPUed. To run accelsearch on GPU, use the -cuda option. Or the program will run on CPU.
-For example: accelsearch -numharm 16 -zmax 256 ur_data.dat -cuda 0
-
-
-0 means the 1st GPU in your machine.
+For example: accelsearch -numharm 16 -zmax 256 ur_data.dat -cuda 0, 0 means the 1st GPU in your machine.
