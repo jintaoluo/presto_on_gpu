@@ -12,6 +12,19 @@
 
 #include "accel_utils_gpu.h"
 
+typedef float2 Complex;
+
+//define a texture memory
+texture<Complex> tex_d_kernel;
+texture<Complex> tex_d_data;
+
+texture<Complex> tex_d_result;
+
+texture<unsigned short> tex_d_zinds;
+texture<unsigned short> tex_d_rinds;
+
+texture<float> tex_d_fundamental;
+
 static __device__ __host__ inline fcomplex ComplexScale(fcomplex, float);
 static __device__ __host__ inline fcomplex ComplexMul(fcomplex, fcomplex);
 static __device__ __host__ inline fcomplex ComplexMul_02(fcomplex, fcomplex);
@@ -22,7 +35,7 @@ static __global__ void ComplexPointwiseMulAndScale_one_loop_02(fcomplex *c, fcom
 
 static __global__ void Complex_Pow_and_Chop(float *d_pow, fcomplex *d_result, int fftlen, int numkern_in_array, int chopbins, int numtocopy);
 
-static __global__ void add_ffdotpows_on_gpu(float *d_fundamental, fcomplex *d_result, int numzs_full, int numrs_full, unsigned short *zinds, unsigned short *rinds, int fftlen, int chopbins);
+static __global__ void add_ffdotpows_on_gpu(float *d_fundamental, fcomplex *d_result, int numzs_full, int numrs_full, unsigned short *zinds, unsigned short *rinds, int fftlen, int chopbins, double obs_zlo, double fullrlo, double harm_fract, int zlo, int rlo);
 
 
 extern "C"
@@ -69,10 +82,18 @@ void complex_corr_conv_gpu(fcomplex * data, fcomplex * kernel_vect_on_gpu,
                        float *d_fundamental,
                        unsigned short *d_zinds, unsigned short *d_rinds,
                        int datainf_flag,
-                       presto_ffts ffts, presto_optype type);
+                       presto_ffts ffts, presto_optype type,
+                       double obs_zlo, double fullrlo, double harm_fract, int zlo, int rlo);
 
 
+extern "C"
+void init_cuFFT_plans(subharminfo **subharminfs, int numharmstages);
 
+extern "C"
+void destroy_cuFFT_plans(subharminfo **subharminfs, int numharmstages);
+
+cufftHandle plan_data_array[16][16];		
+cufftHandle plan_result_array[16][16];		
 
 /******************************************** complex_corr_conv ********************************************************************/
 void complex_corr_conv_gpu(fcomplex * data, fcomplex * kernel_vect_on_gpu,
@@ -86,8 +107,10 @@ void complex_corr_conv_gpu(fcomplex * data, fcomplex * kernel_vect_on_gpu,
                        float *d_fundamental,
                        unsigned short *d_zinds, unsigned short *d_rinds,
                        int datainf_flag,
-                       presto_ffts ffts, presto_optype type)
+                       presto_ffts ffts, presto_optype type,
+                       double obs_zlo, double fullrlo, double harm_fract, int zlo, int rlo)
 {
+
 
 	int fftlen = numdata;
 	int kernel_array_offset;
@@ -109,80 +132,98 @@ void complex_corr_conv_gpu(fcomplex * data, fcomplex * kernel_vect_on_gpu,
 	if(harmtosum > 1){
     kernel_array_offset = offset_array[stage][harmnum-1];
 	}
+	 
+	//copy data to GPU memory
+	checkCudaErrors(cudaMemcpy(d_data, data, sizeof(fcomplex) * fftlen, cudaMemcpyHostToDevice));
+	//FFT data on GPU
+	if(datainf_flag == 1)
+	{					
+		if(harmtosum==1 && harmnum==1){
+			checkCudaErrors(cufftExecC2C(plan_data_array[0][0], (cufftComplex *)d_data, (cufftComplex *)d_data, CUFFT_FORWARD));
+		}
+		if(harmtosum > 1){
+  	  checkCudaErrors(cufftExecC2C(plan_data_array[stage][harmnum-1], (cufftComplex *)d_data, (cufftComplex *)d_data, CUFFT_FORWARD));
+		}
 
-	 
-	 //copy data to GPU memory
-	 checkCudaErrors(cudaMemcpy(d_data, data, sizeof(fcomplex) * fftlen, cudaMemcpyHostToDevice));
-	 
-	cufftHandle plan_data;		
-	if(datainf_flag == 1)//FFT data on GPU
-	{			
-	 	// Create a 1-D  FFT plan.
-		checkCudaErrors(cufftPlan1d(&plan_data, fftlen, CUFFT_C2C, 1));		
-		//Execute the FFT
-		checkCudaErrors(cufftExecC2C(plan_data, (cufftComplex *)d_data, (cufftComplex *)d_data, CUFFT_FORWARD));
 	}
 
-
+	//Bind data and kernel to Texture Memory
+	cudaBindTexture(NULL, tex_d_kernel, kernel_vect_on_gpu, sizeof(fcomplex) * ( kernel_array_offset + 1 + numkern_in_array * fftlen ) );
+	cudaBindTexture(NULL, tex_d_data, d_data, sizeof(fcomplex) * fftlen);
 	//Mul the FFTed data with Kernels
 	if (type == CORR || type == INPLACE_CORR) {
-		ComplexPointwiseMulAndScale_one_loop<<<256, 256>>>(d_result, d_data, kernel_vect_on_gpu, numkern_in_array, fftlen, 1.0/fftlen, kernel_array_offset);
+		ComplexPointwiseMulAndScale_one_loop<<<512, 512>>>(d_result, d_data, kernel_vect_on_gpu, numkern_in_array, fftlen, 1.0/fftlen, kernel_array_offset);
 	}
 	else {
-		ComplexPointwiseMulAndScale_one_loop_02<<<256, 256>>>(d_result, d_data, kernel_vect_on_gpu, numkern_in_array, fftlen, 1.0/fftlen, kernel_array_offset);
-	}
+		ComplexPointwiseMulAndScale_one_loop_02<<<512, 512>>>(d_result, d_data, kernel_vect_on_gpu, numkern_in_array, fftlen, 1.0/fftlen, kernel_array_offset);
+	}	
+	//unbind the data and kenerl from Texture memory
+	cudaUnbindTexture(tex_d_kernel);
+	cudaUnbindTexture(tex_d_data);  	
 
    
   //Inverse FFT   
-  cufftHandle plan;		
-  checkCudaErrors(cufftPlan1d(&plan, fftlen, CUFFT_C2C, numkern_in_array));
-  checkCudaErrors(cufftExecC2C(plan, (cufftComplex *)d_result, (cufftComplex *)d_result, CUFFT_INVERSE));
-
-	
-	//sum harmonics
 	if(harmtosum==1 && harmnum==1){
-		Complex_Pow_and_Chop<<<64, 128>>>(d_fundamental, d_result, fftlen, numkern_in_array, chopbins, numtocopy);
-	}//if fundamental
-	if(harmtosum > 1){	
+		checkCudaErrors(cufftExecC2C(plan_result_array[0][0], (cufftComplex *)d_result, (cufftComplex *)d_result, CUFFT_INVERSE));	
+	}
+	if(harmtosum > 1){
+ 	  checkCudaErrors(cufftExecC2C(plan_result_array[stage][harmnum-1], (cufftComplex *)d_result, (cufftComplex *)d_result, CUFFT_INVERSE));	
+	} 
+
+	//bind the FFTed result
+	cudaBindTexture(NULL, tex_d_result, d_result, sizeof(fcomplex) * fftlen * numkern_in_array );	
+	//sum harmonics
+	if(harmtosum==1 && harmnum==1){//if fundamental
+		Complex_Pow_and_Chop<<<512, 512>>>(d_fundamental, d_result, fftlen, numkern_in_array, chopbins, numtocopy);
+	}
+	if(harmtosum > 1){	//if harmonics
 		//move zinds and rinds to GPU
 		checkCudaErrors(cudaMemcpy(d_zinds, zinds, sizeof(unsigned short) * numzs_full, cudaMemcpyHostToDevice));
 		checkCudaErrors(cudaMemcpy(d_rinds, rinds, sizeof(unsigned short) * numrs_full, cudaMemcpyHostToDevice));		
+		//bind zinds and rinds to Texture Memory
+		cudaBindTexture(NULL, tex_d_zinds, d_zinds, sizeof(unsigned short) * numzs_full );
+		cudaBindTexture(NULL, tex_d_rinds, d_rinds, sizeof(unsigned short) * numrs_full );		
 		//add_ffdotpows_on_gpu
-		add_ffdotpows_on_gpu<<<64, 128>>>(d_fundamental, d_result, numzs_full, numrs_full, d_zinds, d_rinds, fftlen, chopbins);
-	}//if not fundamental
- 
-
-	// clean up FFT plans
-
-	if(datainf_flag == 1)
-	{
-	  checkCudaErrors(cufftDestroy(plan_data));
+		add_ffdotpows_on_gpu<<<512, 512>>>(d_fundamental, d_result, numzs_full, numrs_full, d_zinds, d_rinds, fftlen, chopbins, obs_zlo, fullrlo, harm_fract, zlo, rlo);
+		//Unbind zinds and rinds from Texture Memory		
+		cudaUnbindTexture(tex_d_zinds);    
+		cudaUnbindTexture(tex_d_rinds);    
 	}
-	
-  checkCudaErrors(cufftDestroy(plan));   
+ 
+	cudaUnbindTexture(tex_d_result);
+  
 }                   
 
 /******************************************** add fftdot pows on GPU, choping included ************************************************/
-static __global__ void add_ffdotpows_on_gpu(float *d_fundamental, fcomplex *d_result, int numzs_full, int numrs_full, unsigned short *zinds, unsigned short *rinds, int fftlen, int chopbins)
+static __global__ void add_ffdotpows_on_gpu(float *d_fundamental, fcomplex *d_result, int numzs_full, int numrs_full, unsigned short *zinds, unsigned short *rinds, int fftlen, int chopbins, double obs_zlo, double fullrlo, double harm_fract, int zlo, int rlo)
 {
 
     const int numThreads = blockDim.x * gridDim.x;
     const int threadID = blockIdx.x * blockDim.x + threadIdx.x;		
     
-    int addr_z, addr_r, addr_result, addr_fundamental ;  
+    //int addr_z, addr_r, addr_result, addr_fundamental ;
+    int addr_z, addr_r ;				
+    int addr_result ;
+		
+		Complex buf;
+		
+		int z_index, r_index;
+		
+		for (int i = threadID; i < numrs_full * numzs_full; i += numThreads){    		
+						
+				z_index = i/numrs_full ;
+				addr_z = tex1Dfetch(tex_d_zinds, z_index) ;	
+				
+				r_index = i -  z_index * numrs_full ;				
+				addr_r = tex1Dfetch(tex_d_rinds, r_index) ;
+				
+				addr_result = addr_z * fftlen + chopbins + addr_r ;
+				buf = tex1Dfetch(tex_d_result, addr_result) ;    		
+				
+				d_fundamental[i] += buf.x * buf.x + buf.y * buf.y ;
+				
+		}
 
-    for(int j=0; j< numzs_full; j++)    	
-    {    	
-    	addr_z = zinds[j];    	
-    	addr_result = addr_z * fftlen + chopbins ;
-    	addr_fundamental = j * numrs_full ;    		
-    	for (int i = threadID; i < numrs_full; i += numThreads){    		
-    		addr_r = rinds[i];    	
-    		addr_result +=  addr_r ;    	
-    		addr_fundamental +=  i ;    		
-    		d_fundamental[addr_fundamental] +=  d_result[addr_result].r * d_result[addr_result].r + d_result[addr_result].i * d_result[addr_result].i ;    		
-    	}    	
-    }    
 }
 
 
@@ -204,22 +245,23 @@ static __global__ void Complex_Pow_and_Chop(float *d_pow, fcomplex *d_result, in
     const int threadID = blockIdx.x * blockDim.x + threadIdx.x;		
     
     int addr_result;
-    int addr_pow;
     
+    Complex buf;
     
-    for(int j=0; j< numkern_in_array; j++)
-    {    
-    	addr_result = j * fftlen + chopbins ;
-    	addr_pow 		= j * numtocopy ;   // put mul out of loop 		
-    	for (int i = threadID; i < numtocopy; i += numThreads)
-    	{    	
-    		//addr_result = j * fftlen + chopbins + i ;
-    		addr_result +=  i ;
-    		//addr_pow 		= j * numtocopy + i ;   // put mul out of loop
-    		addr_pow 		+=  i ;   		
-    		d_pow[addr_pow] = d_result[addr_result].r * d_result[addr_result].r + d_result[addr_result].i * d_result[addr_result].i ;    		
-    	}    
-    }    	
+    int z_ind, r_ind ;
+    
+    for (int i = threadID; i < numkern_in_array*numtocopy; i += numThreads){
+    	
+    	z_ind = i/numtocopy;
+    	r_ind = i - z_ind * numtocopy;
+    	
+    	addr_result = z_ind * fftlen + chopbins +  r_ind;
+    	
+    	buf = tex1Dfetch(tex_d_result, addr_result) ;
+    
+    	d_pow[i] = buf.x * buf.x + buf.y * buf.y ;
+    }   
+
 }
 
 
@@ -259,26 +301,33 @@ static __global__ void ComplexPointwiseMulAndScale_one_loop(fcomplex *c, fcomple
     const int numThreads = blockDim.x * gridDim.x;
     const int threadID = blockIdx.x * blockDim.x + threadIdx.x;		
 		
-		int b_addr_offset ;
-   	int c_addr_offset  ;		
-		
 		fcomplex a_buf ;
-		int i, j;
+		fcomplex b_buf ;
+		Complex buf_buf_a, buf_buf_b;
+		int i;
 		
-    for (i = threadID; i < data_size; i += numThreads)
-    {    		
-    		a_buf = a[i] ;
+		int a_index, b_index;
+		
+		int total_num = data_size*numkern_in_array;
+		
+		for (i = threadID; i < total_num; i += numThreads)
+		{
+				a_index = i/data_size;
+				a_index = i - a_index * data_size ;
+				buf_buf_a = tex1Dfetch(tex_d_data, a_index);
+    		a_buf.r = buf_buf_a.x;
+    		a_buf.i = buf_buf_a.y;
     		
-    		c_addr_offset = 0 ;		
-    		b_addr_offset = 0 + kernel_array_offset;
-        for(j=0; j< numkern_in_array; j++)
-        {
-        	c[i+c_addr_offset] = ComplexScale(ComplexMul(a_buf, b[i+b_addr_offset]), scale);                
+    		b_index = i + kernel_array_offset;
+    		buf_buf_b = tex1Dfetch(tex_d_kernel, b_index) ;
+				
+				b_buf.r = buf_buf_b.x;
+	    	b_buf.i = buf_buf_b.y;
+        c[i] = ComplexScale(ComplexMul(a_buf, b_buf), scale);                                
         	
-        	c_addr_offset += data_size ;		
-        	b_addr_offset += data_size ;		
-        }        
-    }
+        
+		}
+
 }
 
 static __global__ void ComplexPointwiseMulAndScale_one_loop_02(fcomplex *c, fcomplex *a, const fcomplex *b, int numkern_in_array, int data_size, float scale, int kernel_array_offset)
@@ -286,26 +335,33 @@ static __global__ void ComplexPointwiseMulAndScale_one_loop_02(fcomplex *c, fcom
     const int numThreads = blockDim.x * gridDim.x;
     const int threadID = blockIdx.x * blockDim.x + threadIdx.x;		
 		
-		int b_addr_offset ;
-   	int c_addr_offset  ;		
-		
 		fcomplex a_buf ;
-		int i, j;
+		fcomplex b_buf ;
+		Complex buf_buf_a, buf_buf_b;
+		int i;
+
+		int a_index, b_index;
 		
-    for (i = threadID; i < data_size; i += numThreads)
-    {    		
-    		a_buf = a[i] ;
+		int total_num = data_size*numkern_in_array;
+		
+		for (i = threadID; i < total_num; i += numThreads)
+		{
+				a_index = i/data_size;
+				a_index = i - a_index * data_size ;
+				buf_buf_a = tex1Dfetch(tex_d_data, a_index);
+    		a_buf.r = buf_buf_a.x;
+    		a_buf.i = buf_buf_a.y;
     		
-    		c_addr_offset = 0 ;		
-    		b_addr_offset = 0 + kernel_array_offset;
-        for(j=0; j< numkern_in_array; j++)
-        {
-        	c[i+c_addr_offset] = ComplexScale(ComplexMul_02(a_buf, b[i+b_addr_offset]), scale);                
+    		b_index = i + kernel_array_offset;
+    		buf_buf_b = tex1Dfetch(tex_d_kernel, b_index) ;
+				
+				b_buf.r = buf_buf_b.x;
+	    	b_buf.i = buf_buf_b.y;
+        c[i] = ComplexScale(ComplexMul_02(a_buf, b_buf), scale);                                
         	
-        	c_addr_offset += data_size ;		
-        	b_addr_offset += data_size ;		
-        }        
-    }
+        
+		}		
+
 }
 /**********************************************************************************************************************************************************/
 
@@ -323,28 +379,29 @@ accel_cand_gpu *prep_cand_array(int size)
 int  search_ffdotpows_gpu(float powcut, float *d_fundamental, accel_cand_gpu * cand_array_search_gpu, accel_cand_gpu * cand_array_sort_gpu, int numzs, int numrs, accel_cand_gpu *cand_gpu_cpu)
 {
 	
-	int *d_addr_jluo;
-	int *h_addr_jluo;
+	int *d_addr;
+	int h_addr;
 	
-	h_addr_jluo = (int *)malloc(sizeof(int) * 1);
-	h_addr_jluo[0]=0;
-	
-	checkCudaErrors(cudaMalloc((void **)&d_addr_jluo, sizeof(int) * 1));	
-	checkCudaErrors(cudaMemcpy(d_addr_jluo, h_addr_jluo, sizeof(int) * 1, cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc((void **)&d_addr, sizeof(int) * 1));	
+	checkCudaErrors(cudaMemset(d_addr, 0, sizeof(int))); // set d_addr to 0
+
+	//bind d_fundamental to texture
+	cudaBindTexture(NULL, tex_d_fundamental, d_fundamental, sizeof(float) * numzs * numrs );
 
 	//search ffdot_pow
-	search_ffdotpows_kernel<<<64, 128>>>(powcut, d_fundamental, cand_array_search_gpu, numzs, numrs, d_addr_jluo);
+	search_ffdotpows_kernel<<<512, 512>>>(powcut, d_fundamental, cand_array_search_gpu, numzs, numrs, d_addr);
 
 	//get nof_cand
-	checkCudaErrors(cudaMemcpy(h_addr_jluo, d_addr_jluo, sizeof(int) * 1, cudaMemcpyDeviceToHost));	
+	checkCudaErrors(cudaMemcpy(&h_addr, d_addr, sizeof(int) * 1, cudaMemcpyDeviceToHost));	
 	int nof_cand ;		
-	nof_cand = h_addr_jluo[0] ;	
+	nof_cand = h_addr;		
 
 	//get the candicates
 	checkCudaErrors(cudaMemcpy(cand_gpu_cpu, cand_array_search_gpu, sizeof(accel_cand_gpu) * nof_cand, cudaMemcpyDeviceToHost));
-
-	free(h_addr_jluo);
-	cudaFree(d_addr_jluo);
+	
+	cudaFree(d_addr);
+	
+	cudaUnbindTexture(tex_d_fundamental);  
 	
 	return nof_cand ;
 }
@@ -355,7 +412,7 @@ static __global__ void  search_ffdotpows_kernel(float powcut, float *d_fundament
     const int numThreads = blockDim.x * gridDim.x;
     const int threadID = blockIdx.x * blockDim.x + threadIdx.x;		
 
-		int i, j ;		
+		int i ;		
 		int nof_cand = 0;
 
 		float pow ;
@@ -369,9 +426,9 @@ static __global__ void  search_ffdotpows_kernel(float powcut, float *d_fundament
 		for (i = threadID; i < numzs*numrs; i += numThreads)
     {    	
     
-    	nof_cand = 0;   	
-    	
-   		pow = d_fundamental[ i ];
+    	nof_cand = 0;   	    	
+
+   		pow = tex1Dfetch(tex_d_fundamental, i);
 
     		if(pow > powcut)
     		{    			
@@ -437,23 +494,23 @@ fcomplex * prep_data_on_gpu(subharminfo **subharminfs, int numharmstages)
 {
 
 	int harm, harmtosum, stage;		
-	int numkern, fftlen;
+	int fftlen;
 	int size_d_data;
 	
 	fcomplex *d_data;
 
 	size_d_data = 0;
-	
-	numkern = subharminfs[0][0].numkern;
+		
 	fftlen = subharminfs[0][0].kern[0].fftlen;
 	
 	size_d_data = fftlen ;
 
+if (numharmstages > 1) {
 
 	for(stage=1; stage<numharmstages; stage++){	
 		harmtosum = 1 << stage;		
 		for (harm = 1; harm < harmtosum; harm += 2) {               					
-			numkern = subharminfs[stage][harm-1].numkern;
+			
 			fftlen = subharminfs[stage][harm-1].kern[0].fftlen;
 			
 			if( size_d_data < fftlen )
@@ -463,6 +520,8 @@ fcomplex * prep_data_on_gpu(subharminfo **subharminfs, int numharmstages)
 			
 		}	
 	}
+
+}
 	
 	//alloc memory for device data
 	 checkCudaErrors(cudaMalloc((void **)&d_data, sizeof(fcomplex) * size_d_data));
@@ -487,6 +546,8 @@ fcomplex * prep_result_on_gpu(subharminfo **subharminfs, int numharmstages)
 
 	size_d_result = numkern * fftlen;
 
+if (numharmstages > 1) {
+
 	for(stage=1; stage<numharmstages; stage++){	
 		harmtosum = 1 << stage;		
 		for (harm = 1; harm < harmtosum; harm += 2) {               		
@@ -500,7 +561,7 @@ fcomplex * prep_result_on_gpu(subharminfo **subharminfs, int numharmstages)
 			}			
 		}	
 	}	
-
+}
 	//Alloc mem for result on GPU  
   checkCudaErrors(cudaMalloc((void **)&d_result, size_d_result * sizeof(fcomplex)));  
 	
@@ -562,6 +623,7 @@ fcomplex * cp_kernel_array_to_gpu(subharminfo **subharminfs, int numharmstages, 
    	}
 
    //other stages
+if (numharmstages > 1) {   
    for(stage=1; stage<numharmstages; stage++){	
 			harmtosum = 1 << stage;		
 			for(harm = 1; harm < harmtosum; harm += 2) {         
@@ -581,7 +643,7 @@ fcomplex * cp_kernel_array_to_gpu(subharminfo **subharminfs, int numharmstages, 
 					
 				}
 			}
-   
+}   
    checkCudaErrors(cudaMemcpy( kernel_vect_on_gpu, kernel_vect_host, sizeof(fcomplex) * kernel_total_size, cudaMemcpyHostToDevice) );
 
    free(kernel_vect_host);
@@ -589,6 +651,78 @@ fcomplex * cp_kernel_array_to_gpu(subharminfo **subharminfs, int numharmstages, 
    return kernel_vect_on_gpu;
 	
 }
+
+//----------------------initialize cuFFT plans ----------------------
+void init_cuFFT_plans(subharminfo **subharminfs, int numharmstages)
+{
+	int harm, harmtosum, stage;		
+	int numkern, fftlen;
+	
+	printf("\ninit_cuFFT_plans\n");
+	
+	numkern = subharminfs[0][0].numkern;
+	fftlen = subharminfs[0][0].kern[0].fftlen;
+
+	checkCudaErrors(cufftPlan1d(&plan_data_array[0][0], fftlen, CUFFT_C2C, 1));		
+	checkCudaErrors(cufftPlan1d(&plan_result_array[0][0], fftlen, CUFFT_C2C, numkern));		
+
+	printf("stage: 0, fftlen : %d, numkern: %d\n", fftlen, numkern);
+
+if (numharmstages > 1) {
+
+	for(stage=1; stage<numharmstages; stage++){	
+		harmtosum = 1 << stage;		
+		for (harm = 1; harm < harmtosum; harm += 2) {               					
+			numkern = subharminfs[stage][harm-1].numkern;
+			fftlen = subharminfs[stage][harm-1].kern[0].fftlen;
+			
+			printf("stage: %d, fftlen : %d, numkern: %d\n", stage, fftlen, numkern);
+				
+			checkCudaErrors(cufftPlan1d(&plan_data_array[stage][harm-1], fftlen, CUFFT_C2C, 1));		
+			checkCudaErrors(cufftPlan1d(&plan_result_array[stage][harm-1], fftlen, CUFFT_C2C, numkern));		
+						
+		}	
+	}	
+
+}
+	
+}
+
+//----------------------destroy cuFFT plans ----------------------
+void destroy_cuFFT_plans(subharminfo **subharminfs, int numharmstages)
+{
+	int harm, harmtosum, stage;		
+	int numkern, fftlen;
+	
+	printf("\ndestroy_cuFFT_plans\n");
+	
+	numkern = subharminfs[0][0].numkern;
+	fftlen = subharminfs[0][0].kern[0].fftlen;
+
+	checkCudaErrors(cufftDestroy(plan_data_array[0][0]));
+	checkCudaErrors(cufftDestroy(plan_result_array[0][0]));
+
+	printf("stage: 0, fftlen : %d, numkern: %d\n", fftlen, numkern);
+
+if (numharmstages > 1) {
+
+	for(stage=1; stage<numharmstages; stage++){	
+		harmtosum = 1 << stage;		
+		for (harm = 1; harm < harmtosum; harm += 2) {               					
+			numkern = subharminfs[stage][harm-1].numkern;
+			fftlen = subharminfs[stage][harm-1].kern[0].fftlen;
+			
+			printf("stage: %d, fftlen : %d, numkern: %d\n", stage, fftlen, numkern);
+	
+			checkCudaErrors(cufftDestroy(plan_data_array[stage][harm-1]));
+			checkCudaErrors(cufftDestroy(plan_result_array[stage][harm-1]));
+					
+		}	
+	}	
+}
+	
+}
+
 
 //----------------------select a cpu to play with --------------------
 void select_cuda_dev(int cuda_inds)

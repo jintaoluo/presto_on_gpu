@@ -42,7 +42,9 @@ extern int corr_complex_gpu(fcomplex * data, int numdata, presto_datainf datainf
                  unsigned short *zinds, unsigned short *rinds,
                  int numzs_full, int numrs_full,
                  float *d_fundamental,
-                 unsigned short *d_zinds, unsigned short *d_rinds);
+                 unsigned short *d_zinds, unsigned short *d_rinds,
+                 double obs_zlo, double fullrlo, double harm_fract, int zlo, int rlo
+                 );
 
 
 extern ffdotpows *init_fundamental_ffdot(int numharm, int harmnum,
@@ -1063,14 +1065,16 @@ void subharm_ffdot_plane_gpu(int numharm, int harmnum,
 		{
 		if (numharm > 1) {
 			int zz , subz, zind;
-			for (ii = 0; ii < numzs_full; ii++) {
+			for (ii = 0; ii < numzs_full; ii++) {			
 				zz = obs->zlo + ii * ACCEL_DZ;//ACCEL_DZ=2
-				subz = calc_required_z(harm_fract, zz);
+				subz = calc_required_z(harm_fract, zz);				
   	    zind = index_from_z(subz, zlo);
-  	    zinds[ii]=zind;
+  	    zinds[ii]=zind;  	    
 			}
 		}
 		}
+
+	
 
    /* Initialize the r-lookup indices */
    if (numharm > 1) {
@@ -1103,6 +1107,7 @@ void subharm_ffdot_plane_gpu(int numharm, int harmnum,
    numdata = hibin - lobin + 1;
    nice_numdata = next2_to_n(numdata);  // for FFTs
    data = get_fourier_amplitudes(lobin, nice_numdata, obs); //lobin, nice_numdata, obs->lobin
+
    
    if (!obs->mmap_file && !obs->dat_input && 0)
        printf("This is newly malloc'd!\n");
@@ -1149,8 +1154,7 @@ void subharm_ffdot_plane_gpu(int numharm, int harmnum,
 
    /* Perform the correlations */
 
-   datainf = RAW;
-   
+   datainf = RAW;   
    nrs = corr_complex_gpu(data, numdata, datainf,
 				                 kernel_vect_on_gpu, fftlen, FFT,
 				                 result, numrs, binoffset,
@@ -1159,7 +1163,8 @@ void subharm_ffdot_plane_gpu(int numharm, int harmnum,
 				                 offset_array, d_data, d_result, 
 				                 zinds, rinds, numzs_full, numrs_full,
 				                 d_fundamental,
-				                 d_zinds, d_rinds);
+				                 d_zinds, d_rinds,
+				                 obs->zlo, fullrlo, harm_fract, zlo, rlo);
 
    // Always free data
    vect_free(data);

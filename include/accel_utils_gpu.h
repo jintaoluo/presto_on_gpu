@@ -1,3 +1,27 @@
+/* ACCEL_USELEN must be less than 65536 since we  */
+/* use unsigned short ints to index our arrays... */
+/* #define ACCEL_USELEN 32160 */
+/* #define ACCEL_USELEN 16000 */
+#define ACCEL_USELEN 7560 
+#define ACCEL_NUMBETWEEN 2
+/* Stepsize in Fourier Freq */
+#define ACCEL_DR  0.5
+/* Reciprocal of ACCEL_DR */
+#define ACCEL_RDR 2
+/* Stepsize in Fourier F-dot */
+#define ACCEL_DZ  2
+/* Reciprocal of ACCEL_DZ */
+#define ACCEL_RDZ 0.5
+/* Closest candidates we will accept as independent */
+#define ACCEL_CLOSEST_R 15.0
+/* Padding for .dat file reading so that we don't SEGFAULT */
+#define ACCEL_PADDING 2000
+
+
+#ifndef DBLCORRECT
+#define DBLCORRECT    1e-14
+#endif
+
 #ifndef _ACCEL_UTILS_GPU_
 #define _ACCEL_UTILS_GPU_
 

@@ -11,7 +11,8 @@ extern void * complex_corr_conv_gpu(fcomplex * data, fcomplex * kernel_vect_on_g
                        fcomplex *d_fundamental,
                        unsigned short *d_zinds, unsigned short *d_rinds,
                        int datainf_flag,
-                       presto_ffts ffts, presto_optype type);
+                       presto_ffts ffts, presto_optype type,
+                       double obs_zlo, double fullrlo, double harm_fract, int zlo, int rlo);
 
 /*define DEBUGPRINT */
 
@@ -27,7 +28,8 @@ int corr_complex_gpu(fcomplex * data, int numdata, presto_datainf datainf,
                  int numzs_full, int numrs_full,
                  //fcomplex *d_fundamental,
                  float *d_fundamental,
-                 unsigned short *d_zinds, unsigned short *d_rinds)
+                 unsigned short *d_zinds, unsigned short *d_rinds,
+                 double obs_zlo, double fullrlo, double harm_fract, int zlo, int rlo)
   /* This routine is a general correlation or convolution routine    */
   /* for complex data.  It can perform convolutions or correlations  */
   /* on raw complex data, data that is prepared for a convolution/   */
@@ -258,7 +260,8 @@ int corr_complex_gpu(fcomplex * data, int numdata, presto_datainf datainf,
                        d_fundamental,
                        d_zinds, d_rinds,
                        0,
-                       NOFFTS, optype);	
+                       NOFFTS, optype,
+                       obs_zlo, fullrlo, harm_fract, zlo, rlo);	
 	}      
 	
 	if( datainf == RAW )//implement fft in the conv
@@ -274,7 +277,8 @@ int corr_complex_gpu(fcomplex * data, int numdata, presto_datainf datainf,
                        d_fundamental,
                        d_zinds, d_rinds,
                        1,
-                       NOFFTS, optype);	
+                       NOFFTS, optype,
+                       obs_zlo, fullrlo, harm_fract, zlo, rlo);	
 	}      	
 
 

@@ -62,6 +62,8 @@ extern ffdotpows *init_fundamental_ffdot(int numharm, int harmnum,
                                int stage, int **offset_array,
                                fcomplex *kernel_vect_on_gpu, fcomplex *d_data, fcomplex *d_result
                                );
+                               
+extern void init_cuFFT_plans(subharminfo **subharminfs, int numharmstages);                               
 /**************************** Functions on GPU, End****************************/
 
 static void print_percent_complete(int current, int number, char *what, int reset)
@@ -223,6 +225,8 @@ if(cmd->cudaP == 1){/****************************************call GPU to run the
 	accel_cand_gpu *cand_gpu_cpu ;	
 	cand_gpu_cpu = (accel_cand_gpu *) malloc(sizeof(accel_cand_gpu) * subharminfs[0][0].numkern * subharminfs[0][0].kern[0].fftlen );
 	
+	//initialize cuFFT plans on GPU
+	init_cuFFT_plans( subharminfs, obs.numharmstages );
 
    /* Start the main search loop */
    printf("\n\n/* Start the main search loop */\n\n");
@@ -283,7 +287,7 @@ if(cmd->cudaP == 1){/****************************************call GPU to run the
 
    printf("\n\nDone searching.  Now optimizing each candidate.\n\n");
 
-   
+	 destroy_cuFFT_plans( subharminfs, obs.numharmstages ); //destroy cuFFT plans
    free_subharminfos(obs.numharmstages, subharminfs);
 
    {                            /* Candidate list trimming and optimization */
@@ -388,6 +392,7 @@ if(cmd->cudaP == 1){/****************************************call GPU to run the
 	cudaFree_kernel_vect(cand_array_sort_gpu);
 	//cudaFree_kernel_vect(input_vect_on_gpu);
   
+  
   free(cand_gpu_cpu);
    
    return (0);
@@ -406,7 +411,7 @@ else{
          print_percent_complete(startr - obs.rlo,
                                 obs.highestbin - obs.rlo, "search", 0);
          nextr = startr + ACCEL_USELEN * ACCEL_DR;
-         lastr = nextr - ACCEL_DR;
+         lastr = nextr - ACCEL_DR;         
          fundamental = subharm_ffdot_plane(1, 1, startr, lastr,
                                            &subharminfs[0][0], &obs);
          cands = search_ffdotpows(fundamental, 1, &obs, cands);
@@ -431,7 +436,7 @@ else{
          startr = nextr;
       }
       print_percent_complete(obs.highestbin - obs.rlo,
-                             obs.highestbin - obs.rlo, "search", 0);
+                             obs.highestbin - obs.rlo, "search", 0);                             
    }
 
    printf("\n\nDone searching.  Now optimizing each candidate.\n\n");
