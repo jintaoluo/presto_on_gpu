@@ -1,6 +1,8 @@
 > It is a branch of PRESTO. We are working to accelerate the program with GPU. The work is based on Scott Ransom's C version,https://github.com/scottransom/presto
 About presto, please refer to http://www.cv.nrao.edu/~sransom/presto/
 
+It is a branch besides the master branch.
+
 
 #2013-12-02
 ####what's new####
